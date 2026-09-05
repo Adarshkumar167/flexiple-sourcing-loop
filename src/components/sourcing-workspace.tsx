@@ -2,16 +2,19 @@
 
 import { useEffect, useMemo, useState } from "react";
 import CandidateCard from "@/components/candidate-card";
+import CriteriaDiffView from "@/components/criteria-diff-view";
 import CriteriaEditor from "@/components/criteria-editor";
 import CriteriaSnapshot from "@/components/criteria-snapshot";
+import ExecutionTracePanel from "@/components/execution-trace-panel";
 import { ApiClientError, postJson } from "@/lib/client-api";
 import {
+  GenerateCriteriaResponseSchema,
   RankRequestSchema,
-  RankingResponseSchema,
+  RankingApiResponseSchema,
   RefineRequestSchema,
   RefinementResponseSchema,
-  SearchCriteriaSchema,
   SearchSessionStateSchema,
+  type ExecutionTrace,
   type ObjectiveFilters,
   type RecruiterRating,
   type RubricCriterion,
@@ -28,6 +31,8 @@ const STEPS = [
   { label: "Refine", caption: "Rate and teach" },
   { label: "Freeze", caption: "Lock the shortlist" },
 ];
+
+const MAX_SAVED_EXECUTIONS = 40;
 
 type PendingAction = "criteria" | "rank" | "refine" | null;
 type RetryAction = Exclude<PendingAction, null>;
@@ -52,8 +57,16 @@ function createInitialState(): SearchSessionState {
     feedback: "",
     round: 0,
     history: [],
+    executions: [],
     frozenAt: null,
   };
+}
+
+function appendExecution(
+  executions: readonly ExecutionTrace[],
+  execution: ExecutionTrace,
+): ExecutionTrace[] {
+  return [...executions, execution].slice(-MAX_SAVED_EXECUTIONS);
 }
 
 function activeStep(stage: SearchSessionState["stage"]): number {
@@ -243,7 +256,7 @@ function SearchLanding({
       <section>
         <div className="inline-flex items-center gap-2 rounded-full border border-[#cfddd4] bg-white px-3 py-1.5 text-xs font-bold text-[#356149] shadow-sm">
           <span className="h-2 w-2 rounded-full bg-[#42a36c] shadow-[0_0_0_4px_rgba(66,163,108,0.12)]" />
-          48 local profiles · real Gemini ranking
+          48 local profiles · auditable Gemini pipeline
         </div>
         <h1 className="mt-6 max-w-3xl text-4xl font-semibold leading-[1.08] tracking-[-0.045em] text-[#132019] sm:text-5xl lg:text-[58px]">
           Turn a hiring brief into a shortlist you can defend.
@@ -308,8 +321,8 @@ function SearchLanding({
           {[
             ["01", "Generate", "Gemini separates objective constraints from subjective judgment."],
             ["02", "Filter & rank", "Code filters the complete file; the model scores only the survivors."],
-            ["03", "Refine", "Ratings and written feedback update the logic and rerun the search."],
-            ["04", "Freeze", "The final filters, rubric, evidence, and shortlist lock together."],
+            ["03", "Refine", "Ratings update the logic with an exact before/after diff."],
+            ["04", "Audit & freeze", "Latency, tokens, funnel counts, grounding, and the shortlist lock together."],
           ].map(([number, title, detail]) => (
             <li key={number} className="grid grid-cols-[34px_1fr] gap-3">
               <span className="text-xs font-black text-[#ffad88]">{number}</span>
@@ -321,7 +334,7 @@ function SearchLanding({
           ))}
         </ol>
         <div className="mt-7 rounded-xl border border-white/10 bg-white/[0.05] p-4 text-xs leading-5 text-[#c7d3cb]">
-          Structured outputs are validated twice—on the server and again before the browser applies them.
+          Structured outputs are validated twice. Trace metadata records behavior, never raw prompts, recruiter text, or candidate payloads.
         </div>
       </aside>
     </div>
@@ -361,6 +374,9 @@ export default function SourcingWorkspace() {
     () => Object.keys(state.ratings).length,
     [state.ratings],
   );
+  const latestHistory = state.history.at(-1);
+  const latestExecution = state.executions.at(-1);
+  const canRefine = ratedCount > 0 || state.feedback.trim().length > 0;
 
   function updateFilters(filters: ObjectiveFilters) {
     setState((current) => ({ ...current, filters }));
@@ -385,7 +401,7 @@ export default function SourcingWorkspace() {
       const criteria = await postJson({
         path: "/api/criteria",
         body: { requirement },
-        schema: SearchCriteriaSchema,
+        schema: GenerateCriteriaResponseSchema,
       });
       setState((current) => ({
         ...current,
@@ -399,6 +415,7 @@ export default function SourcingWorkspace() {
         feedback: "",
         round: 0,
         history: [],
+        executions: [criteria.execution],
         frozenAt: null,
       }));
     } catch (caught) {
@@ -418,8 +435,8 @@ export default function SourcingWorkspace() {
       setError(
         localError(
           "Fix the filters or rubric before running the search.",
-          payload.error.issues.map((issue) =>
-            `${issue.path.join(".") || "criteria"}: ${issue.message}`,
+          payload.error.issues.map(
+            (issue) => `${issue.path.join(".") || "criteria"}: ${issue.message}`,
           ),
         ),
       );
@@ -438,17 +455,21 @@ export default function SourcingWorkspace() {
     setLastAction("rank");
     setPending("rank");
     try {
-      const ranking = await postJson({
+      const response = await postJson({
         path: "/api/rank",
         body: payload.data,
-        schema: RankingResponseSchema,
+        schema: RankingApiResponseSchema,
       });
+      const { execution, ...ranking } = response;
       setState((current) => ({
         ...current,
         stage: "results",
+        filters: payload.data.filters,
+        rubric: payload.data.rubric,
         ranking,
         ratings: {},
         feedback: "",
+        executions: appendExecution(current.executions, execution),
         frozenAt: null,
       }));
     } catch (caught) {
@@ -509,9 +530,12 @@ export default function SourcingWorkspace() {
             ratings: payload.data.ratings,
             recruiterIntent: refinement.recruiterIntent,
             changes: refinement.changes,
+            criteriaDiff: refinement.criteriaDiff,
+            executionId: refinement.execution.id,
             createdAt: new Date().toISOString(),
           },
         ],
+        executions: appendExecution(current.executions, refinement.execution),
       }));
     } catch (caught) {
       setError(asDisplayError(caught));
@@ -563,10 +587,6 @@ export default function SourcingWorkspace() {
     setLastAction(null);
   }
 
-  const latestHistory = state.history.at(-1);
-  const canRefine =
-    ratedCount > 0 || state.feedback.trim().length > 0;
-
   return (
     <div className="min-h-screen bg-[#f4f7f4] text-[#17231d]">
       <header className="sticky top-0 z-30 border-b border-[#dce3de]/90 bg-[#f8faf8]/90 backdrop-blur-xl">
@@ -584,7 +604,12 @@ export default function SourcingWorkspace() {
           </div>
           <ProgressSteps stage={state.stage} />
           <div className="flex items-center gap-2">
-            <span className="hidden rounded-full border border-[#d7dfd9] bg-white px-3 py-1.5 text-[11px] font-semibold text-[#66736b] sm:inline-flex">
+            {state.executions.length > 0 && (
+              <span className="hidden rounded-full border border-[#cfe1d5] bg-[#edf7f0] px-3 py-1.5 text-[11px] font-bold text-[#35634a] sm:inline-flex">
+                {state.executions.length} audited run{state.executions.length === 1 ? "" : "s"}
+              </span>
+            )}
+            <span className="hidden rounded-full border border-[#d7dfd9] bg-white px-3 py-1.5 text-[11px] font-semibold text-[#66736b] md:inline-flex">
               Session-only state
             </span>
             {state.stage !== "search" && (
@@ -638,6 +663,11 @@ export default function SourcingWorkspace() {
                 </p>
               </div>
             </div>
+            {latestExecution && (
+              <div className="mb-6">
+                <ExecutionTracePanel trace={latestExecution} />
+              </div>
+            )}
             <CriteriaEditor
               filters={state.filters}
               rubric={state.rubric}
@@ -663,6 +693,8 @@ export default function SourcingWorkspace() {
                 }
               />
 
+              {latestExecution && <ExecutionTracePanel trace={latestExecution} />}
+
               <section className="rounded-2xl border border-[#d8e0da] bg-white p-5 shadow-[0_16px_40px_rgba(23,54,37,0.06)]">
                 <p className="text-xs font-bold uppercase tracking-[0.14em] text-[#d1683f]">
                   Teach the search
@@ -675,18 +707,33 @@ export default function SourcingWorkspace() {
                 </p>
 
                 {state.history.length > 0 && (
-                  <div className="mt-4 max-h-44 space-y-2 overflow-y-auto rounded-xl bg-[#f5f8f6] p-3">
-                    {state.history.slice(-3).map((entry) => (
-                      <div key={entry.round} className="text-[11px] leading-4">
-                        <p className="font-bold text-[#42604d]">Round {entry.round}</p>
-                        <p className="mt-0.5 text-[#718078]">
-                          {entry.feedback || `${entry.ratings.length} candidate rating(s)`}
-                        </p>
-                        <p className="mt-1 font-medium text-[#31533f]">
-                          ↳ {entry.recruiterIntent}
-                        </p>
-                      </div>
-                    ))}
+                  <div className="mt-4 max-h-52 space-y-3 overflow-y-auto rounded-xl bg-[#f5f8f6] p-3">
+                    {state.history.slice(-3).map((entry) => {
+                      const trace = entry.executionId
+                        ? state.executions.find((execution) => execution.id === entry.executionId)
+                        : undefined;
+                      return (
+                        <div key={entry.round} className="text-[11px] leading-4">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="font-bold text-[#42604d]">Round {entry.round}</p>
+                            {trace && (
+                              <span className="text-[9px] tabular-nums text-[#869189]">
+                                {(trace.durationMs / 1_000).toFixed(1)}s
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-0.5 text-[#718078]">
+                            {entry.feedback || `${entry.ratings.length} candidate rating(s)`}
+                          </p>
+                          {entry.criteriaDiff && (
+                            <CriteriaDiffView diff={entry.criteriaDiff} compact />
+                          )}
+                          <p className="mt-1 font-medium text-[#31533f]">
+                            ↳ {entry.recruiterIntent}
+                          </p>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
 
@@ -757,22 +804,43 @@ export default function SourcingWorkspace() {
                       </p>
                     </div>
                     <span className="rounded-full bg-white px-3 py-1 text-[11px] font-bold text-[#4a775c] shadow-sm">
-                      Search rerun complete
+                      Deterministic diff · rerun complete
                     </span>
                   </div>
-                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                    {latestHistory.changes.map((change, index) => (
-                      <div
-                        key={`${change.area}-${index}`}
-                        className="rounded-xl bg-white/80 p-3 text-xs leading-5"
-                      >
-                        <span className="font-bold capitalize text-[#326148]">
-                          {change.area}: {change.change}
-                        </span>
-                        <p className="mt-0.5 text-[#6b7b70]">{change.reason}</p>
+                  <div className="mt-4">
+                    {latestHistory.criteriaDiff ? (
+                      <CriteriaDiffView diff={latestHistory.criteriaDiff} />
+                    ) : (
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {latestHistory.changes.map((change, index) => (
+                          <div
+                            key={`${change.area}-${index}`}
+                            className="rounded-xl bg-white/80 p-3 text-xs leading-5"
+                          >
+                            <span className="font-bold capitalize text-[#326148]">
+                              {change.area}: {change.change}
+                            </span>
+                            <p className="mt-0.5 text-[#6b7b70]">{change.reason}</p>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    )}
                   </div>
+                  <details className="mt-3 rounded-xl border border-[#d9e6dd] bg-white/70 px-3 py-2.5 text-xs">
+                    <summary className="cursor-pointer font-bold text-[#476551]">
+                      Model rationale for the refinement
+                    </summary>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                      {latestHistory.changes.map((change, index) => (
+                        <div key={`${change.area}-reason-${index}`} className="leading-5">
+                          <span className="font-semibold capitalize text-[#326148]">
+                            {change.area}: {change.change}
+                          </span>
+                          <p className="text-[#6b7b70]">{change.reason}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
                 </div>
               )}
 
@@ -852,7 +920,7 @@ export default function SourcingWorkspace() {
                     {state.ranking.results.length} shortlisted from {state.ranking.totalCount}
                   </p>
                   <p className="mt-1 text-xs">
-                    {state.round} refinement {state.round === 1 ? "round" : "rounds"}
+                    {state.round} refinement {state.round === 1 ? "round" : "rounds"} · {state.executions.length} audited runs
                   </p>
                   {state.frozenAt && (
                     <time className="mt-1 block text-[11px]" dateTime={state.frozenAt}>
@@ -865,11 +933,13 @@ export default function SourcingWorkspace() {
 
             <div className="grid gap-7 lg:grid-cols-[350px_minmax(0,1fr)] lg:items-start">
               <aside className="grid gap-4 lg:sticky lg:top-24">
-                <CriteriaSnapshot
-                  filters={state.filters}
-                  rubric={state.rubric}
-                  frozen
-                />
+                <CriteriaSnapshot filters={state.filters} rubric={state.rubric} frozen />
+                {latestExecution && (
+                  <ExecutionTracePanel
+                    trace={latestExecution}
+                    title="Inspect final pipeline run"
+                  />
+                )}
                 {state.history.length > 0 && (
                   <section className="rounded-2xl border border-[#d8e0da] bg-white p-5 shadow-[0_16px_40px_rgba(23,54,37,0.06)]">
                     <p className="text-xs font-bold uppercase tracking-[0.14em] text-[#d1683f]">
@@ -884,6 +954,9 @@ export default function SourcingWorkspace() {
                           <p className="mt-1 text-[11px] leading-4 text-[#758078]">
                             {entry.feedback || `${entry.ratings.length} candidate rating(s)`}
                           </p>
+                          {entry.criteriaDiff && (
+                            <CriteriaDiffView diff={entry.criteriaDiff} compact />
+                          )}
                           <p className="mt-1 text-xs leading-5 text-[#42564a]">
                             {entry.recruiterIntent}
                           </p>

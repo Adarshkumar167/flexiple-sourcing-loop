@@ -4,6 +4,7 @@ import type {
   CriterionScore,
   Evidence,
   EvidenceField,
+  GroundingAudit,
   ObjectiveFilters,
   Profile,
   RankedCandidate,
@@ -142,21 +143,22 @@ export function isEvidenceGrounded(
   const claimedValue = normalizeEvidenceText(evidence.value);
   if (!claimedValue) return false;
 
-  return evidenceValues(profile, evidence.field).some((actualValue) => {
-    const normalizedActual = normalizeEvidenceText(actualValue);
-    return (
-      normalizedActual === claimedValue ||
-      normalizedActual.includes(claimedValue) ||
-      claimedValue.includes(normalizedActual)
-    );
-  });
+  return evidenceValues(profile, evidence.field).some(
+    (actualValue) => normalizeEvidenceText(actualValue) === claimedValue,
+  );
 }
+
+type CriterionValidationResult = {
+  scores: CriterionScore[];
+  evidenceReceived: number;
+  evidenceGrounded: number;
+};
 
 function validateCriterionScores(
   profile: Profile,
   scores: readonly CriterionScore[],
   rubric: readonly RubricCriterion[],
-): CriterionScore[] {
+): CriterionValidationResult {
   const rubricIds = new Set(rubric.map((criterion) => criterion.id));
   const scoreIds = scores.map((score) => score.criterionId);
 
@@ -169,19 +171,21 @@ function validateCriterionScores(
   if (
     scores.length !== rubric.length ||
     scoreIds.some((criterionId) => !rubricIds.has(criterionId)) ||
-    rubric.some(
-      (criterion) => !scoreIds.includes(criterion.id),
-    )
+    rubric.some((criterion) => !scoreIds.includes(criterion.id))
   ) {
     throw new RankingValidationError(
       `The model did not score every rubric criterion for ${profile.id}.`,
     );
   }
 
-  return scores.map((score) => {
+  let evidenceReceived = 0;
+  let evidenceGrounded = 0;
+  const validatedScores = scores.map((score) => {
+    evidenceReceived += score.evidence.length;
     const groundedEvidence = score.evidence.filter((evidence) =>
       isEvidenceGrounded(profile, evidence),
     );
+    evidenceGrounded += groundedEvidence.length;
     if (groundedEvidence.length === 0) {
       throw new RankingValidationError(
         `The model returned unsupported evidence for ${profile.id}/${score.criterionId}.`,
@@ -189,6 +193,12 @@ function validateCriterionScores(
     }
     return { ...score, evidence: groundedEvidence };
   });
+
+  return {
+    scores: validatedScores,
+    evidenceReceived,
+    evidenceGrounded,
+  };
 }
 
 export function calculateWeightedScore(
@@ -215,13 +225,13 @@ export function calculateWeightedScore(
   return Math.round(weightedScore * 10) / 10;
 }
 
-export function buildRankedCandidates(
+export function buildRankedCandidatesWithAudit(
   candidateProfiles: readonly Profile[],
   assessments: readonly CandidateAssessment[],
   rubric: readonly RubricCriterion[],
   filters: ObjectiveFilters,
   limit = 5,
-): RankedCandidate[] {
+): { results: RankedCandidate[]; grounding: GroundingAudit } {
   const profileById = new Map(
     candidateProfiles.map((profile) => [profile.id, profile]),
   );
@@ -233,19 +243,19 @@ export function buildRankedCandidates(
 
   if (
     assessments.length !== candidateProfiles.length ||
-    candidateProfiles.some(
-      (profile) => !assessmentIds.includes(profile.id),
-    ) ||
-    assessments.some(
-      (assessment) => !profileById.has(assessment.profileId),
-    )
+    candidateProfiles.some((profile) => !assessmentIds.includes(profile.id)) ||
+    assessments.some((assessment) => !profileById.has(assessment.profileId))
   ) {
     throw new RankingValidationError(
       "The model must score every filtered profile exactly once.",
     );
   }
 
-  return assessments
+  let evidenceReceived = 0;
+  let evidenceGrounded = 0;
+  let criteriaReceived = 0;
+
+  const results = assessments
     .map((assessment) => {
       const profile = profileById.get(assessment.profileId);
       if (!profile) {
@@ -253,15 +263,18 @@ export function buildRankedCandidates(
           `Unknown profile ${assessment.profileId}.`,
         );
       }
-      const criterionScores = validateCriterionScores(
+      criteriaReceived += assessment.criterionScores.length;
+      const validated = validateCriterionScores(
         profile,
         assessment.criterionScores,
         rubric,
       );
+      evidenceReceived += validated.evidenceReceived;
+      evidenceGrounded += validated.evidenceGrounded;
       return {
         profile,
-        criterionScores,
-        weightedScore: calculateWeightedScore(criterionScores, rubric),
+        criterionScores: validated.scores,
+        weightedScore: calculateWeightedScore(validated.scores, rubric),
         overallRationale: assessment.overallRationale,
         objectiveEvidence: buildObjectiveEvidence(profile, filters),
       };
@@ -272,4 +285,42 @@ export function buildRankedCandidates(
         left.profile.name.localeCompare(right.profile.name),
     )
     .slice(0, limit);
+
+  const criteriaExpected = candidateProfiles.length * rubric.length;
+  const evidenceCoveragePercent =
+    evidenceReceived === 0
+      ? 100
+      : Math.round((evidenceGrounded / evidenceReceived) * 1000) / 10;
+
+  return {
+    results,
+    grounding: {
+      candidatesExpected: candidateProfiles.length,
+      candidatesValidated: assessments.length,
+      criteriaExpected,
+      criteriaReceived,
+      criteriaValidated: criteriaExpected,
+      evidenceReceived,
+      evidenceGrounded,
+      evidenceDropped: evidenceReceived - evidenceGrounded,
+      evidenceCoveragePercent,
+      weightedScoresServerComputed: true,
+    },
+  };
+}
+
+export function buildRankedCandidates(
+  candidateProfiles: readonly Profile[],
+  assessments: readonly CandidateAssessment[],
+  rubric: readonly RubricCriterion[],
+  filters: ObjectiveFilters,
+  limit = 5,
+): RankedCandidate[] {
+  return buildRankedCandidatesWithAudit(
+    candidateProfiles,
+    assessments,
+    rubric,
+    filters,
+    limit,
+  ).results;
 }

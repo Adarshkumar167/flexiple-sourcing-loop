@@ -132,7 +132,7 @@ Refinement rules:
 4. Preserve unmentioned filters and rubric intent.
 5. Return the complete next filters and complete next rubric, not a patch.
 6. Rubric criterion IDs must be unique lowercase kebab-case; weights must be positive integers summing to exactly 100.
-7. changes must state what changed and why in language a recruiter can trust. Include only real changes.
+7. changes must state what changed and why in language a recruiter can trust. Include only real changes; return [] when the configuration is unchanged.
 8. Return every filter property, using [] or null when absent.
 9. Return only the structured response requested by the API schema.`;
 }

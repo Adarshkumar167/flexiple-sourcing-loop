@@ -1,11 +1,14 @@
-# Loom Walkthrough — 8–10 Minute Talk Track
+# Loom Walkthrough — 9–11 Minute Talk Track
 
-The assignment allows up to 15 minutes. Aim for 8–10 minutes, one continuous take, and a visible end-to-end product rather than a code tour.
+The assignment allows up to 15 minutes. Aim for one continuous take centered on recruiter trust: deterministic filtering, bounded model judgment, exact evidence grounding, server totals, and an auditable refinement loop.
 
 ## Before recording
 
-- Add a working `GEMINI_API_KEY` to `.env.local` and restart the app.
-- Run `npm run check` once.
+- Add a working `GEMINI_API_KEY` to `.env.local`; never paste it into chat or show the file.
+- Restart the app after any environment change, then run one complete private rehearsal.
+- Run `npm run check` and `npm audit` once.
+- Confirm one live criteria → rank → refine flow succeeds under the current Gemini quota.
+- Open each execution trace during rehearsal. Confirm latency/call fields render; token fields may legitimately say **Not returned**.
 - Open a clean browser session and click **Start over** if old state exists.
 - Keep DevTools available for the offline recovery demonstration, but closed initially.
 - Hide `.env.local`, terminal history, notifications, bookmarks, and unrelated tabs.
@@ -23,79 +26,146 @@ Rate one product-backend candidate `5` and one database-reliability specialist `
 
 > Product backend experience matters more than pure database reliability. Scale-up exposure is a plus, not a hard requirement.
 
-## Talk track
+## Exact narrative
 
-### 0:00–0:45 — Frame the product
+### 0:00–0:50 — Frame the engineering problem
 
-- “This is a single-session sourcing refinement loop over the complete supplied 48-profile dataset.”
-- “Gemini interprets and scores; deterministic TypeScript owns hard filtering and weighted totals.”
-- Point out the four visible stages: Brief, Criteria, Refine, Freeze.
+Show the product, not the code.
 
-### 0:45–1:40 — Free text to structured search logic
+> “This is a single-session sourcing refinement loop over the complete supplied 48-profile dataset. The hard problem is not generating JSON—it is deciding what the model may control, proving which evidence survived validation, and showing exactly why a recruiter’s search changed.”
+
+> “The pipeline is deterministic hard filters, bounded LLM scoring, exact evidence grounding, then server-computed totals. I do not claim this local sample solves Flexiple’s 98-million-profile retrieval problem.”
+
+Point out the visible Brief, Criteria, Refine, and Freeze progression.
+
+### 0:50–1:55 — Free text to inspectable search logic
 
 - Paste or select the demo brief.
 - Click **Build search logic**.
-- Let the loading state remain visible for a moment.
-- Explain that the API key stays in a Node.js Route Handler and all model output is schema-validated.
+- Explain that the key stays in a Node.js Route Handler and every response is runtime-validated.
+- Open **Inspect execution trace**.
 
-### 1:40–3:00 — Review and edit criteria
+Say:
+
+> “This trace is server-authored. It shows step latency, actual provider calls, bounded retries, structure repairs, and provider usage when Gemini returns it. SDK retries are disabled, so the wrapper is not hiding extra calls.”
+
+Point to **Prompt version & provider schema**:
+
+> “These are application template version labels plus a fingerprint of the sanitized schema sent to Gemini—not a raw prompt inspector and not a hash of every runtime Zod rule.”
+
+Point to the privacy boundary:
+
+> “Raw prompts, recruiter feedback, candidate payloads, API keys, and provider interaction IDs are never persisted in telemetry.”
+
+Do not claim token values if the UI says **Not returned**.
+
+### 1:55–3:05 — Recruiter controls hard versus soft logic
 
 - Read Gemini’s short interpretation.
-- Show objective filters and explain AND/OR semantics for skills.
+- Show objective filters and explain required-skill AND versus alternative-skill OR semantics.
 - Change one harmless field and change it back to demonstrate direct editing.
-- Show the subjective rubric, weights, and **Balance to 100** behavior if useful.
-- Click **Run search**.
+- Show rubric descriptions and weights; use **Balance to 100** only if useful.
 
-### 3:00–4:45 — Inspect ranked evidence
+Say:
+
+> “Gemini proposes this configuration, but the recruiter can inspect and edit it before any candidate is ranked. The model cannot silently relax hard filters during scoring.”
+
+Click **Run search**.
+
+### 3:05–4:55 — Prove the ranking path
 
 - Point out `matched / 48 evaluated locally`.
-- Open one or two rubric-evidence accordions.
-- Explain that cited evidence values must exist in the selected structured profile.
-- Point out that Gemini returns 1–5 criterion scores while application code computes the final weighted fit.
-- Expand **Full profile details** briefly.
+- Expand one or two rubric-evidence sections.
+- Open the ranking execution trace.
+- Show the candidate funnel: local pool, matched, excluded, LLM window, returned.
+- Show the grounding audit and weighted-total statement.
 
-### 4:45–6:15 — Feedback-driven refinement
+Say:
+
+> “Every survivor is scored exactly once against every criterion. Evidence must equal an approved canonical representation from the declared profile field after normalization. Unsupported extras are dropped; a criterion with no grounded evidence rejects the ranking.”
+
+> “Gemini returns only 1-to-5 criterion scores. Application code computes the weighted fit and chooses the top five.”
+
+If useful, briefly expand **Full profile details** to connect cited evidence to the source record.
+
+### 4:55–6:55 — Feedback, factual diff, and merged trace
 
 - Apply the prepared `5` and `2` ratings.
-- Enter the prepared feedback.
+- Enter the prepared refinement text.
 - Click **Refine & rerank**.
-- Show the change banner: what changed and why.
-- Call out that “scale-up is a plus” should modify the rubric rather than overfit a hard filter.
-- Show the new order and the visible conversation/refinement trail.
+- Start with the red/green deterministic diff.
 
-### 6:15–7:15 — Failure and safe recovery
+Say:
+
+> “The model returns a complete proposed configuration. The server compares normalized before and after objects. Array order alone does not count; rubric additions, removals, descriptions, weights, and priority order do.”
+
+> “This visual diff is factual authority. The expandable model rationale is separate explanatory prose.”
+
+Call out that “scale-up is a plus” should affect the rubric, not become an overfitted hard filter. If Gemini returns no structural change, show the truthful empty diff rather than inventing a change.
+
+Open the latest execution trace:
+
+> “A refinement is two bounded model stages when candidates survive: update the logic, then rerank. This trace merges both stages while retaining the deterministic filter funnel and grounding audit.”
+
+Show the new shortlist order and refinement trail.
+
+### 6:55–7:55 — Demonstrate real failure recovery
 
 - Open DevTools → Network and select **Offline**.
-- Submit another short refinement such as “Keep the same logic; slightly favor stronger title alignment.”
-- Show the inline network error and emphasize that filters, rubric, ratings/message, and existing results remain intact.
+- Submit another short refinement, for example: “Keep the same logic; slightly favor stronger title alignment.”
+- Show the inline network error and unchanged successful state.
 - Restore **Online**.
-- Click **Retry safely** and show the successful completion.
+- Click **Retry safely** and show completion.
 
-This demonstrates a real transport failure rather than a mocked LLM response.
+Say:
 
-### 7:15–8:15 — Freeze
+> “This is a real transport failure, not a mocked model response. Failed provider operations preserve the last successful state and do not fabricate a success trace.”
+
+If quota makes a second live call risky, demonstrate offline failure without retry and state that limitation honestly.
+
+### 7:55–8:45 — Freeze the decision record
 
 - Click **Freeze shortlist**.
-- Show the read-only final filters, rubric, refinement trail, ranked candidates, evidence, and frozen timestamp.
-- Mention that refresh restores this state only within the browser session.
+- Show the read-only final filters, rubric, deterministic refinement trail, ranked evidence, execution trace, and frozen timestamp.
+- Mention that refresh restores state only within this browser session and old v1 session blobs hydrate with an empty trace list.
 
-### 8:15–9:30 — Decisions and cuts
+### 8:45–10:15 — Close on judgment, not feature count
 
-Show the README, not individual implementation files:
+Show the README sections **Auditable execution and deterministic refinement**, **Decisions, priorities, and cuts**, and **Known limitations and claim boundary**.
 
-- Real server-side Gemini calls and committed prompts
-- Local deterministic filtering
-- Zod and JSON Schema validation
-- Grounded evidence and server-computed totals
-- State-preserving retries
-- Deliberate cuts: auth, DB, vector search, streaming, multiple providers, deployment
+Say:
 
-Close by stating the actual timebox honestly and showing the repository URL.
+> “I deliberately rejected a theatrical provider switcher because I had no second credentialed path to validate. I also rejected claiming BM25 or vectors solve 98-million-profile search without an index, embeddings pipeline, retrieval evaluation, and scale tests.”
+
+> “The differentiator I chose is defensible trust infrastructure: deterministic diffs, exact grounding, truthful retry accounting, strict contracts, and privacy-safe traces.”
+
+> “The repository passes lint, TypeScript, production build, audit, and focused offline behavior probes. The live provider fields shown in this recording are limited to what this Gemini key actually returned.”
+
+Close by showing the repository URL and stating the actual timebox only if accurate.
+
+## Claims to use
+
+- “Deterministic hard filters → bounded LLM scoring → exact evidence grounding → server totals.”
+- “The server-computed diff is factual authority; model prose is rationale.”
+- “SDK retries are disabled, so successful trace provider-call counts reflect wrapper invocations.”
+- “Provider token fields are displayed only when returned.”
+- “The trace stores aggregate behavior, not raw prompts or candidate payloads.”
+- “This is validated for the supplied 48-profile corpus, not claimed as a 98M-scale retrieval system.”
+
+## Claims to avoid
+
+- “The system is production-ready for 98 million profiles.”
+- “The schema hash fingerprints the whole prompt and every runtime validator.”
+- “Every failed provider attempt has a stored trace.”
+- “Grounding proves every sentence in the rationale is true.”
+- “Token counts are always available.”
+- “Multiple providers are supported.”
 
 ## Avoid during the recording
 
 - Do not display the API key or `.env.local`.
-- Do not read every README section or source file.
-- Do not claim a feature you did not exercise.
+- Do not open raw provider responses, terminal history, or private candidate/recruiter payloads.
+- Do not read every README section or tour every source file.
+- Do not claim a field you did not exercise in the live flow.
 - Do not call the no-match screen an LLM failure; it deliberately avoids the ranking call.
 - Do not exceed 15 minutes.

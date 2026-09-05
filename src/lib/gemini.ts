@@ -1,7 +1,9 @@
 import "server-only";
 
+import { createHash } from "node:crypto";
 import { GoogleGenAI } from "@google/genai";
 import { z, type ZodType } from "zod";
+import type { PromptArtifact, TokenUsage } from "@/lib/schemas";
 
 const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const REQUEST_TIMEOUT_MS = 35_000;
@@ -36,6 +38,33 @@ const GEMINI_SCHEMA_ARRAY_KEYS = new Set([
   "oneOf",
   "prefixItems",
 ]);
+
+export type StructuredGenerationTelemetry = {
+  durationMs: number;
+  modelRequested: string;
+  modelReturned: string | null;
+  providerCalls: number;
+  transportRetries: number;
+  structuredAttempts: number;
+  structureRepairs: number;
+  retrySleepMs: number;
+  usage: TokenUsage;
+  artifact: PromptArtifact;
+};
+
+export type StructuredGenerationResult<T> = {
+  data: T;
+  telemetry: StructuredGenerationTelemetry;
+};
+
+type ProviderRequestTelemetry = {
+  modelRequested: string;
+  modelReturned: string | null;
+  providerCalls: number;
+  transportRetries: number;
+  retrySleepMs: number;
+  usage: TokenUsage;
+};
 
 export class LlmServiceError extends Error {
   readonly code: string;
@@ -81,6 +110,10 @@ function getApiKey(): string {
 
 function getModel(): string {
   return process.env.GEMINI_MODEL?.trim() || DEFAULT_MODEL;
+}
+
+function roundedDuration(startedMs: number): number {
+  return Math.max(0, Math.round(performance.now() - startedMs));
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -285,6 +318,82 @@ function sanitizeSchemaNode(value: unknown): unknown {
   return sanitized;
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hashSchema(schema: Record<string, unknown>): string {
+  return `sha256:${createHash("sha256").update(canonicalJson(schema)).digest("hex")}`;
+}
+
+function emptyUsage(): TokenUsage {
+  return {
+    input: null,
+    output: null,
+    total: null,
+    thought: null,
+    cached: null,
+  };
+}
+
+function addToken(current: number | null, next: number | undefined): number | null {
+  return next === undefined ? current : (current ?? 0) + next;
+}
+
+function addUsage(
+  current: TokenUsage,
+  next: {
+    total_input_tokens?: number;
+    total_output_tokens?: number;
+    total_tokens?: number;
+    total_thought_tokens?: number;
+    total_cached_tokens?: number;
+  } | undefined,
+): TokenUsage {
+  if (!next) return current;
+  return {
+    input: addToken(current.input, next.total_input_tokens),
+    output: addToken(current.output, next.total_output_tokens),
+    total: addToken(current.total, next.total_tokens),
+    thought: addToken(current.thought, next.total_thought_tokens),
+    cached: addToken(current.cached, next.total_cached_tokens),
+  };
+}
+
+function mergeUsage(left: TokenUsage, right: TokenUsage): TokenUsage {
+  return {
+    input:
+      left.input === null && right.input === null
+        ? null
+        : (left.input ?? 0) + (right.input ?? 0),
+    output:
+      left.output === null && right.output === null
+        ? null
+        : (left.output ?? 0) + (right.output ?? 0),
+    total:
+      left.total === null && right.total === null
+        ? null
+        : (left.total ?? 0) + (right.total ?? 0),
+    thought:
+      left.thought === null && right.thought === null
+        ? null
+        : (left.thought ?? 0) + (right.thought ?? 0),
+    cached:
+      left.cached === null && right.cached === null
+        ? null
+        : (left.cached ?? 0) + (right.cached ?? 0),
+  };
+}
+
 /**
  * Gemini accepts only a subset of JSON Schema. String length/regex keywords are
  * removed here, and nested array cardinality is intentionally left to Zod to
@@ -304,29 +413,56 @@ async function requestGemini({
   prompt: string;
   responseSchema: Record<string, unknown>;
   maxOutputTokens: number;
-}): Promise<string> {
+}): Promise<{ text: string; telemetry: ProviderRequestTelemetry }> {
+  const modelRequested = getModel();
   const client = new GoogleGenAI({
     apiKey: getApiKey(),
     httpOptions: { timeout: REQUEST_TIMEOUT_MS },
   });
 
   let lastError: unknown;
+  let providerCalls = 0;
+  let transportRetries = 0;
+  let retrySleepMs = 0;
+  let usage = emptyUsage();
+  let modelReturned: string | null = null;
+
   for (let attempt = 0; attempt < MAX_TRANSPORT_ATTEMPTS; attempt += 1) {
     try {
-      const response = await client.interactions.create({
-        model: getModel(),
-        input: prompt,
-        generation_config: {
-          max_output_tokens: maxOutputTokens,
-          thinking_level: "low",
+      providerCalls += 1;
+      const response = await client.interactions.create(
+        {
+          model: modelRequested,
+          input: prompt,
+          generation_config: {
+            max_output_tokens: maxOutputTokens,
+            thinking_level: "low",
+          },
+          response_format: {
+            type: "text",
+            mime_type: "application/json",
+            schema: responseSchema,
+          },
+          store: false,
         },
-        response_format: {
-          type: "text",
-          mime_type: "application/json",
-          schema: responseSchema,
-        },
-        store: false,
-      });
+        { maxRetries: 0 },
+      );
+
+      modelReturned =
+        typeof response.model === "string" ? response.model : modelReturned;
+      usage = addUsage(usage, response.usage);
+
+      if (response.status !== "completed") {
+        throw new LlmServiceError({
+          code: "LLM_INTERACTION_INCOMPLETE",
+          message:
+            "Gemini did not complete the interaction. Your previous search state is unchanged.",
+          retryable: true,
+          status: 502,
+          details: [`Interaction status: ${response.status}`],
+        });
+      }
+
       const text = response.output_text?.trim();
       if (!text) {
         throw new LlmServiceError({
@@ -337,7 +473,17 @@ async function requestGemini({
           status: 502,
         });
       }
-      return text;
+      return {
+        text,
+        telemetry: {
+          modelRequested,
+          modelReturned,
+          providerCalls,
+          transportRetries,
+          retrySleepMs,
+          usage,
+        },
+      };
     } catch (error) {
       lastError = error;
       if (
@@ -346,7 +492,10 @@ async function requestGemini({
       ) {
         throw mapProviderError(error);
       }
-      await sleep(700 * (attempt + 1));
+      const delay = 700 * (attempt + 1);
+      transportRetries += 1;
+      retrySleepMs += delay;
+      await sleep(delay);
     }
   }
 
@@ -355,41 +504,82 @@ async function requestGemini({
 
 export async function generateStructured<T>({
   prompt,
+  promptId,
   schema,
+  schemaId,
   maxOutputTokens = 8_192,
 }: {
   prompt: string;
+  promptId: string;
   schema: ZodType<T>;
+  schemaId: string;
   maxOutputTokens?: number;
-}): Promise<T> {
+}): Promise<StructuredGenerationResult<T>> {
+  const startedMs = performance.now();
   const responseSchema = toResponseJsonSchema(schema);
+  const artifact: PromptArtifact = {
+    promptId,
+    schemaId,
+    schemaHash: hashSchema(responseSchema),
+  };
   let currentPrompt = prompt;
   let lastDetails: string[] = [];
+  let providerCalls = 0;
+  let transportRetries = 0;
+  let retrySleepMs = 0;
+  let usage = emptyUsage();
+  let modelRequested = getModel();
+  let modelReturned: string | null = null;
+  let structureRepairs = 0;
 
   for (
     let structureAttempt = 0;
     structureAttempt < MAX_STRUCTURE_ATTEMPTS;
     structureAttempt += 1
   ) {
-    const rawText = await requestGemini({
+    const request = await requestGemini({
       prompt: currentPrompt,
       responseSchema,
       maxOutputTokens,
     });
+    providerCalls += request.telemetry.providerCalls;
+    transportRetries += request.telemetry.transportRetries;
+    retrySleepMs += request.telemetry.retrySleepMs;
+    usage = mergeUsage(usage, request.telemetry.usage);
+    modelRequested = request.telemetry.modelRequested;
+    modelReturned = request.telemetry.modelReturned ?? modelReturned;
 
     let parsedJson: unknown;
     try {
-      parsedJson = JSON.parse(stripMarkdownFence(rawText));
+      parsedJson = JSON.parse(stripMarkdownFence(request.text));
     } catch {
       lastDetails = ["response: invalid JSON"];
+      structureRepairs += 1;
       currentPrompt = `${prompt}\n\nThe previous response was not valid JSON. Return a corrected response that follows the requested schema exactly, with no markdown fences or commentary.`;
       continue;
     }
 
     const parsed = schema.safeParse(parsedJson);
-    if (parsed.success) return parsed.data;
+    if (parsed.success) {
+      return {
+        data: parsed.data,
+        telemetry: {
+          durationMs: roundedDuration(startedMs),
+          modelRequested,
+          modelReturned,
+          providerCalls,
+          transportRetries,
+          structuredAttempts: structureAttempt + 1,
+          structureRepairs,
+          retrySleepMs,
+          usage,
+          artifact,
+        },
+      };
+    }
 
     lastDetails = validationDetails(parsed.error);
+    structureRepairs += 1;
     currentPrompt = `${prompt}\n\nThe previous response failed validation:\n${lastDetails.join("\n")}\nReturn a complete corrected response that follows the requested schema exactly. Do not return a patch or commentary.`;
   }
 

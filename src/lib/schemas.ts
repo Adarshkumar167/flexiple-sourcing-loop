@@ -181,7 +181,7 @@ export const RefinementModelOutputSchema = z
     recruiterIntent: z.string().trim().min(8).max(400),
     filters: ObjectiveFiltersSchema,
     rubric: RubricSchema,
-    changes: z.array(RefinementChangeSchema).min(1).max(8),
+    changes: z.array(RefinementChangeSchema).max(8),
   })
   .strict();
 
@@ -203,13 +203,182 @@ export const RankingResponseSchema = z
   })
   .strict();
 
+export const ObjectiveFilterFieldSchema = z.enum([
+  "locations",
+  "minYearsExperience",
+  "maxYearsExperience",
+  "requiredSkills",
+  "anySkills",
+  "titleKeywords",
+  "currentCompanyTypes",
+  "companyBackgroundTypes",
+  "companyKeywords",
+  "educationKeywords",
+]);
+
+const FilterDiffValueSchema = z.union([
+  z.array(z.string().trim().min(1).max(100)).max(16),
+  z.number().int().min(0).max(50),
+  z.null(),
+]);
+
+export const FilterDiffSchema = z
+  .object({
+    field: ObjectiveFilterFieldSchema,
+    before: FilterDiffValueSchema,
+    after: FilterDiffValueSchema,
+  })
+  .strict();
+
+export const RubricDiffSchema = z
+  .object({
+    criterionId: z.string().min(1).max(40),
+    changeType: z.enum(["added", "removed", "updated"]),
+    before: RubricCriterionSchema.nullable(),
+    after: RubricCriterionSchema.nullable(),
+    beforeIndex: z.number().int().min(0).max(5).nullable(),
+    afterIndex: z.number().int().min(0).max(5).nullable(),
+  })
+  .strict();
+
+export const CriteriaDiffSchema = z
+  .object({
+    filters: z.array(FilterDiffSchema).max(10),
+    rubric: z.array(RubricDiffSchema).max(12),
+  })
+  .strict();
+
+const TraceCountSchema = z.number().int().nonnegative();
+const TraceHashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
+
+export const TokenUsageSchema = z
+  .object({
+    input: TraceCountSchema.nullable(),
+    output: TraceCountSchema.nullable(),
+    total: TraceCountSchema.nullable(),
+    thought: TraceCountSchema.nullable(),
+    cached: TraceCountSchema.nullable(),
+  })
+  .strict();
+
+export const PromptArtifactSchema = z
+  .object({
+    promptId: z.string().regex(/^[a-z][a-z0-9.-]{2,63}$/),
+    schemaId: z.string().regex(/^[a-z][a-z0-9.-]{2,63}$/),
+    schemaHash: TraceHashSchema,
+  })
+  .strict();
+
+export const ExecutionStepSchema = z
+  .object({
+    name: z.string().regex(/^[a-z][a-z0-9.-]{2,63}$/),
+    label: z.string().trim().min(2).max(80),
+    status: z.enum(["completed", "skipped"]),
+    durationMs: TraceCountSchema,
+  })
+  .strict();
+
+export const LlmExecutionSchema = z
+  .object({
+    provider: z.literal("google-genai"),
+    modelsRequested: z.array(z.string().trim().min(1).max(100)).min(1).max(4),
+    modelsReturned: z.array(z.string().trim().min(1).max(100)).max(4),
+    providerCalls: TraceCountSchema,
+    transportRetries: TraceCountSchema,
+    structuredAttempts: TraceCountSchema,
+    structureRepairs: TraceCountSchema,
+    retrySleepMs: TraceCountSchema,
+    sdkRetriesDisabled: z.literal(true),
+    usage: TokenUsageSchema,
+    artifacts: z.array(PromptArtifactSchema).min(1).max(4),
+  })
+  .strict();
+
+export const FailedFilterCountsSchema = z
+  .object({
+    location: TraceCountSchema,
+    minimumExperience: TraceCountSchema,
+    maximumExperience: TraceCountSchema,
+    requiredSkills: TraceCountSchema,
+    alternativeSkills: TraceCountSchema,
+    title: TraceCountSchema,
+    currentCompanyType: TraceCountSchema,
+    companyBackground: TraceCountSchema,
+    company: TraceCountSchema,
+    education: TraceCountSchema,
+  })
+  .strict();
+
+export const ProfileFunnelSchema = z
+  .object({
+    totalProfiles: z.number().int().min(1).max(48),
+    hardFilterMatched: z.number().int().min(0).max(48),
+    hardFilterExcluded: z.number().int().min(0).max(48),
+    sentToModel: z.number().int().min(0).max(48),
+    assessmentsReceived: z.number().int().min(0).max(48),
+    returnedResults: z.number().int().min(0).max(5),
+    failedFilterCounts: FailedFilterCountsSchema,
+  })
+  .strict();
+
+export const GroundingAuditSchema = z
+  .object({
+    candidatesExpected: z.number().int().min(1).max(48),
+    candidatesValidated: z.number().int().min(1).max(48),
+    criteriaExpected: TraceCountSchema,
+    criteriaReceived: TraceCountSchema,
+    criteriaValidated: TraceCountSchema,
+    evidenceReceived: TraceCountSchema,
+    evidenceGrounded: TraceCountSchema,
+    evidenceDropped: TraceCountSchema,
+    evidenceCoveragePercent: z.number().min(0).max(100),
+    weightedScoresServerComputed: z.literal(true),
+  })
+  .strict();
+
+export const ExecutionTraceSchema = z
+  .object({
+    id: z.string().uuid(),
+    operation: z.enum(["criteria", "rank", "refine"]),
+    startedAt: z.string().datetime(),
+    durationMs: TraceCountSchema,
+    steps: z.array(ExecutionStepSchema).min(1).max(16),
+    llm: LlmExecutionSchema.nullable(),
+    funnel: ProfileFunnelSchema.nullable(),
+    grounding: GroundingAuditSchema.nullable(),
+    privacy: z
+      .object({
+        rawPromptStored: z.literal(false),
+        candidateDataLogged: z.literal(false),
+        providerInteractionStored: z.literal(false),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const GenerateCriteriaResponseSchema = z
+  .object({
+    ...SearchCriteriaSchema.shape,
+    execution: ExecutionTraceSchema,
+  })
+  .strict();
+
+export const RankingApiResponseSchema = z
+  .object({
+    ...RankingResponseSchema.shape,
+    execution: ExecutionTraceSchema,
+  })
+  .strict();
+
 export const RefinementResponseSchema = z
   .object({
     recruiterIntent: z.string().trim().min(8).max(400),
     filters: ObjectiveFiltersSchema,
     rubric: RubricSchema,
-    changes: z.array(RefinementChangeSchema).min(1).max(8),
+    changes: z.array(RefinementChangeSchema).max(8),
+    criteriaDiff: CriteriaDiffSchema,
     ranking: RankingResponseSchema,
+    execution: ExecutionTraceSchema,
   })
   .strict();
 
@@ -219,7 +388,9 @@ export const RefinementHistoryEntrySchema = z
     feedback: z.string().max(1500),
     ratings: z.array(RecruiterRatingSchema).max(5),
     recruiterIntent: z.string().trim().min(8).max(400),
-    changes: z.array(RefinementChangeSchema).min(1).max(8),
+    changes: z.array(RefinementChangeSchema).max(8),
+    criteriaDiff: CriteriaDiffSchema.optional(),
+    executionId: z.string().uuid().optional(),
     createdAt: z.string().datetime(),
   })
   .strict();
@@ -240,6 +411,7 @@ export const SearchSessionStateSchema = z
     feedback: z.string().max(1500),
     round: z.number().int().min(0).max(20),
     history: z.array(RefinementHistoryEntrySchema).max(20),
+    executions: z.array(ExecutionTraceSchema).max(40).default([]),
     frozenAt: z.string().datetime().nullable(),
   })
   .strict();
@@ -271,6 +443,21 @@ export type RecruiterRating = z.infer<typeof RecruiterRatingSchema>;
 export type RefinementChange = z.infer<typeof RefinementChangeSchema>;
 export type RankedCandidate = z.infer<typeof RankedCandidateSchema>;
 export type RankingResponse = z.infer<typeof RankingResponseSchema>;
+export type ObjectiveFilterField = z.infer<typeof ObjectiveFilterFieldSchema>;
+export type FilterDiff = z.infer<typeof FilterDiffSchema>;
+export type RubricDiff = z.infer<typeof RubricDiffSchema>;
+export type CriteriaDiff = z.infer<typeof CriteriaDiffSchema>;
+export type TokenUsage = z.infer<typeof TokenUsageSchema>;
+export type PromptArtifact = z.infer<typeof PromptArtifactSchema>;
+export type ExecutionStep = z.infer<typeof ExecutionStepSchema>;
+export type LlmExecution = z.infer<typeof LlmExecutionSchema>;
+export type ProfileFunnel = z.infer<typeof ProfileFunnelSchema>;
+export type GroundingAudit = z.infer<typeof GroundingAuditSchema>;
+export type ExecutionTrace = z.infer<typeof ExecutionTraceSchema>;
+export type GenerateCriteriaResponse = z.infer<
+  typeof GenerateCriteriaResponseSchema
+>;
+export type RankingApiResponse = z.infer<typeof RankingApiResponseSchema>;
 export type RefinementResponse = z.infer<typeof RefinementResponseSchema>;
 export type RefinementHistoryEntry = z.infer<
   typeof RefinementHistoryEntrySchema
