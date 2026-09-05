@@ -2,7 +2,6 @@
 
 A focused full-stack implementation of Flexiple's sourcing refinement challenge. A recruiter describes a role in plain English, reviews editable hard filters and a weighted rubric, ranks the locally filtered profile pool with Gemini, teaches the search through ratings and written feedback, and freezes an evidence-backed shortlist. The differentiator is an auditable pipeline: application code owns filtering, evidence validation, weighted totals, structural diffs, and privacy-safe execution traces.
 
-> **Loom walkthrough:** add the public Loom URL here after recording. The prepared talk track is in [`docs/LOOM-WALKTHROUGH.md`](docs/LOOM-WALKTHROUGH.md).
 
 ## What works
 
@@ -288,7 +287,6 @@ Focused transient assertions (no committed test harness or provider call) cover:
 - zero-match `/api/rank` with skipped model steps and `execution.llm === null`;
 - malformed JSON and missing-key API contracts.
 
-A successful local Gemini flow is still required before recording to verify live latency, model-return, and token fields for the reviewer's current key/quota. Never paste the key into chat or commit it.
 
 ## Commands
 
@@ -331,8 +329,3 @@ src/
     ├── schemas.ts
     └── search-service.ts
 ```
-
-## Submission aids
-
-- [Loom walkthrough script](docs/LOOM-WALKTHROUGH.md)
-- [Final repository and email checklist](docs/SUBMISSION-CHECKLIST.md)
